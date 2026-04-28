@@ -140,11 +140,13 @@ class HealthCheckApplicationConfig(BaseModel):
     status_code: int = 200  # Expected status code
     timeout: int = 4  # in seconds
     interval: int = 2  # in seconds
+    headers: Optional[Dict[str, str]] = None
 
 
 class HealthCheckConfig(BaseModel):
     stop_watcher_on_failure: bool = False
     applications: List[HealthCheckApplicationConfig] = []
+    headers: Optional[Dict[str, str]] = None
 
 
 class OutputConfig(BaseModel):

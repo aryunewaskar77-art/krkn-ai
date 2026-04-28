@@ -168,6 +168,27 @@ class TestHealthCheckConfig:
         assert app.timeout == 4
         assert app.interval == 2
 
+    def test_health_check_config_headers(self):
+        """Test optional headers field on both health check config models"""
+        # HealthCheckConfig global headers
+        config = HealthCheckConfig(headers={"Authorization": "Bearer ${TOKEN}"})
+        assert config.headers == {"Authorization": "Bearer ${TOKEN}"}
+
+        assert HealthCheckConfig().headers is None
+
+        # HealthCheckApplicationConfig per-endpoint headers
+        app = HealthCheckApplicationConfig(
+            name="api",
+            url="http://localhost:8080/health",
+            headers={"X-Custom": "value"},
+        )
+        assert app.headers == {"X-Custom": "value"}
+
+        app_no_headers = HealthCheckApplicationConfig(
+            name="api", url="http://localhost:8080/health"
+        )
+        assert app_no_headers.headers is None
+
 
 class TestOutputConfig:
     """Test OutputConfig model"""
