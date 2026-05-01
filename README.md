@@ -119,6 +119,11 @@ uv run krkn_ai discover -k ./tmp/kubeconfig.yaml \
 # Path to your kubeconfig file
 kubeconfig_file_path: "./tmp/kubeconfig.yaml"
 
+# Baseline evaluation configuration
+baseline:
+  enable: true
+  duration: 120
+
 # Optional: Random seed for reproducible runs
 # seed: 42
 
@@ -202,11 +207,6 @@ cluster_components:
   - labels:
       kubernetes.io/hostname: node-2
     name: node-2
-
-# Baseline evaluation configuration
-baseline:
-  enable: true
-  duration: 120
 
 # Adaptive mutation dynamically changes mutation rate based on population diversity
 adaptive_mutation:
