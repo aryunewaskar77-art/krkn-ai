@@ -1,19 +1,10 @@
-"""
-This module is used to run health checks for the application URLs and keep track of the results.
-
-Working Details:
-1. Asynchronous health check for each URL.
-2. Keep track of the results in a list.
-3. Once there is signal from main thread that the test is complete, or in case the api status check fails, then the watcher stops.
-4. Return the results to the main thread by seperate method.
-"""
-
+import asyncio
 from collections import defaultdict
 import threading
 import time
-import requests
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional
 import numpy as np
+import httpx
 
 from krkn_ai.utils.logger import get_logger
 from krkn_ai.models.config import (
@@ -28,82 +19,106 @@ logger = get_logger(__name__)
 class HealthCheckWatcher:
     def __init__(self, config: HealthCheckConfig):
         self.config = config
-        self._stop_event = threading.Event()
-        self._threads: List[threading.Thread] = []
-        # Each thread stores results in its own list - ZERO contention!
-        self._thread_results: Dict[int, Tuple[str, List[HealthCheckResult]]] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stop_event: Optional[asyncio.Event] = None
+        self._thread: Optional[threading.Thread] = None
+        self._results: Dict[str, List[HealthCheckResult]] = defaultdict(list)
+        self._lock = threading.Lock()
 
     def run(self):
-        # Start a thread for each health check
+        """Starts the health check watcher in a background thread with an asyncio loop."""
         logger.debug(
             f"Starting health check watcher for {len(self.config.applications)} applications"
         )
-        for health_check in self.config.applications:
-            t = threading.Thread(target=self.run_health_check, args=(health_check,))
-            t.start()
-            self._threads.append(t)
+        self._thread = threading.Thread(target=self._run_event_loop, daemon=True)
+        self._thread.start()
 
-    def run_health_check(self, health_check: HealthCheckApplicationConfig):
-        # Each thread gets its own private results list
-        thread_id = threading.current_thread().ident
-        if thread_id is None:
-            return  # Skip if thread ID is None (should not happen in normal operation)
-        thread_results: List[HealthCheckResult] = []
-        self._thread_results[thread_id] = (health_check.url, thread_results)
+    def _run_event_loop(self):
+        """Internal method to run the asyncio event loop in a background thread."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._stop_event = asyncio.Event()
 
-        # Simple polling loop, stops when stop() is called
+        try:
+            self._loop.run_until_complete(self._main())
+        finally:
+            self._loop.close()
+
+    async def _main(self):
+        """Main async entry point for the watcher."""
+        async with httpx.AsyncClient() as client:
+            tasks = []
+            for app_config in self.config.applications:
+                tasks.append(self._watch_application(client, app_config))
+
+            # Run all watchers concurrently
+            await asyncio.gather(*tasks)
+
+    async def _watch_application(
+        self, client: httpx.AsyncClient, app_config: HealthCheckApplicationConfig
+    ):
+        """Asynchronous polling loop for a single application."""
         while not self._stop_event.is_set():
             try:
-                resp = requests.get(health_check.url, timeout=health_check.timeout)
+                start_time = time.monotonic()
+                resp = await client.get(app_config.url, timeout=app_config.timeout)
+                elapsed = time.monotonic() - start_time
                 status = resp.status_code
-                success = status == health_check.status_code
+                success = status == app_config.status_code
                 error = None
+            except httpx.RequestError as e:
+                status = -1
+                success = False
+                elapsed = -1
+                error = str(e)
             except Exception as e:
                 status = -1
                 success = False
-                resp = None
-                error = str(e)
+                elapsed = -1
+                error = f"Unexpected error: {str(e)}"
 
             result = HealthCheckResult(
-                name=health_check.name,
+                name=app_config.name,
                 status_code=status,
                 success=success,
                 error=error,
-                response_time=resp.elapsed.total_seconds() if resp is not None else -1,
+                response_time=elapsed,
             )
 
-            # Store in thread-private list - NO LOCKS, NO CONTENTION!
-            thread_results.append(result)
+            with self._lock:
+                self._results[app_config.url].append(result)
 
             if not success and self.config.stop_watcher_on_failure:
+                logger.warning(
+                    f"Health check failed for {app_config.name} ({app_config.url}). Stopping watcher."
+                )
                 self._stop_event.set()
                 break
 
-            time.sleep(health_check.interval)
+            try:
+                # Wait for the interval or until stopped
+                await asyncio.wait_for(self._stop_event.wait(), timeout=app_config.interval)
+                break  # If wait() returns, it means stop_event is set
+            except asyncio.TimeoutError:
+                continue  # Interval reached, continue loop
 
     def stop(self):
-        logger.debug("Stopping health check watcher")
-        self._stop_event.set()
-        for t in self._threads:
-            t.join()
+        """Stops the health check watcher and waits for the thread to finish."""
+        if self._loop and self._stop_event:
+            logger.debug("Stopping health check watcher")
+            self._loop.call_soon_threadsafe(self._stop_event.set)
+            if self._thread:
+                self._thread.join(timeout=5)
 
     def get_results(self) -> Dict[str, List[HealthCheckResult]]:
-        """Aggregate results from all threads - called after threads complete"""
-        results = defaultdict(list)
-
-        # Each thread has its own URL and results list
-        for url, thread_results in self._thread_results.values():
-            results[url].extend(thread_results)
-
-        return dict(results)
+        """Returns the collected results."""
+        with self._lock:
+            return dict(self._results)
 
     def summarize_success_rate(
         self, results: Dict[str, List[HealthCheckResult]]
     ) -> float:
-        """
-        Overall fail score across different URL results
-        """
-        # Flatten all results from all URLs into a single list
+        """Overall fail score across different URL results"""
         all_results = []
         for result_list in results.values():
             all_results.extend(result_list)
@@ -119,16 +134,14 @@ class HealthCheckWatcher:
     def summarize_response_time(
         self, health_check_results: Dict[str, List[HealthCheckResult]]
     ) -> float:
+        """Calculates response time outlier score using IQR."""
         score: float = 0.0
         total = 0
         for _, results in health_check_results.items():
-            response_times = []
-            for result in results:
-                if result.success:
-                    response_times.append(result.response_time)
+            response_times = [r.response_time for r in results if r.success]
 
-            if len(response_times) < 4:  # Not enough data to calculate outliers
-                return 0
+            if len(response_times) < 4:
+                continue
 
             q1 = np.percentile(response_times, 25)
             q3 = np.percentile(response_times, 75)
@@ -138,6 +151,7 @@ class HealthCheckWatcher:
             outliers = [t for t in response_times if t > upper_bound]
             score += len(outliers)
             total += len(results)
+
         if total == 0:
             return 0.0
         score = (score / total) * 10.0
