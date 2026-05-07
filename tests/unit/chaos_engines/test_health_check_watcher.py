@@ -284,7 +284,9 @@ class TestHealthCheckWatcherHeaders:
         watcher.run()
         watcher.stop()
 
-        assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer endpoint"
+        assert (
+            mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer endpoint"
+        )
 
     @patch("krkn_ai.chaos_engines.health_check_watcher.requests.get")
     def test_global_and_endpoint_headers_merged(self, mock_get):
@@ -336,7 +338,10 @@ class TestHealthCheckWatcherHeaders:
         watcher.run()
         watcher.stop()
 
-        assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer resolved-token"
+        assert (
+            mock_get.call_args.kwargs["headers"]["Authorization"]
+            == "Bearer resolved-token"
+        )
 
     @patch("krkn_ai.chaos_engines.health_check_watcher.requests.get")
     def test_missing_param_leaves_template_unchanged(self, mock_get):
@@ -360,4 +365,6 @@ class TestHealthCheckWatcherHeaders:
         watcher.run()
         watcher.stop()
 
-        assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer $MISSING"
+        assert (
+            mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer $MISSING"
+        )
