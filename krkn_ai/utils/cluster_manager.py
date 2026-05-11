@@ -333,13 +333,11 @@ class ClusterManager:
         except Exception as e:
             logger.warning("Failed to fetch cluster node metrics: %s", e)
 
-        node_list = []
-
-        for node in nodes:
+        def process_node(node):
             # Check whether node is unschedulable
             if node.spec.unschedulable:
                 logger.debug("Node %s is unschedulable, skipping", node.metadata.name)
-                continue
+                return None
             # Check whether node is not Ready
             is_ready = False
             for condition in node.status.conditions:
@@ -348,7 +346,7 @@ class ClusterManager:
                     break
             if not is_ready:
                 logger.debug("Node %s is not Ready, skipping", node.metadata.name)
-                continue
+                return None
 
             labels = {}
             if node.metadata.labels is not None:
@@ -396,7 +394,17 @@ class ClusterManager:
                     node.metadata.name,
                     e,
                 )
-            node_list.append(node_component)
+            return node_component
+
+        node_list = []
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(process_node, node) for node in nodes]
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    node_list.append(result)
 
         logger.debug("Filtered %d nodes", len(node_list))
         return node_list
