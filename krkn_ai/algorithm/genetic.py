@@ -193,6 +193,7 @@ class GeneticAlgorithm:
 
             # Increment generation counter after evaluation
             cur_generation += 1
+            self.completed_generations = cur_generation
 
             # Check stopping criteria after fitness evaluation (for fitness threshold, saturation, and exploration)
             elapsed_after_eval = time.time() - start_time
